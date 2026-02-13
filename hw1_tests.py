@@ -5,6 +5,8 @@ from collections import Counter
 import mugrade
 import pytest
 import dis
+import inspect
+import types
 
 
 images = MNIST(".", train=True, download=True)
@@ -59,10 +61,75 @@ class MugradeSubmitAssertion:
         mugrade.submit(False)
         return False
     
-def check_function_calls(f, func_name):
-    inst = [a for a in dis.get_instructions(f) if a.argval == func_name]
-    return len(inst) > 0
-    
+
+def check_function_calls(f, func_name, max_depth=2, seen=None, _current_depth=0):
+    """
+    Check if function f calls func_name.
+    Args:
+        max_depth: Maximum recursion depth (None = unlimited, 1 = direct calls only)
+        _current_depth: Internal tracker for current depth
+    """
+    # Check depth limit
+    if max_depth is not None and _current_depth >= max_depth:
+        return False
+
+    if seen is None:
+        seen = set()
+    if f in seen:
+        return False
+    seen.add(f)
+
+    for inst in dis.get_instructions(f):
+
+        # Direct match
+        if inst.argval == func_name:
+            return True
+
+        obj = None
+
+        if inst.opname == "LOAD_GLOBAL":
+            obj = f.__globals__.get(inst.argval)
+
+        elif inst.opname == "LOAD_DEREF":
+            if f.__closure__ is None:
+                continue
+            freevars = f.__code__.co_freevars
+            if inst.argval in freevars:
+                idx = freevars.index(inst.argval)
+                try:
+                    obj = f.__closure__[idx].cell_contents
+                except ValueError:
+                    # Cell is empty - skip it
+                    continue
+            else:
+                continue
+
+        elif inst.opname == "LOAD_CONST":
+            const = inst.argval
+            if inspect.iscode(const):
+                try:
+                    # Create closure with the right number of cells
+                    num_freevars = len(const.co_freevars)
+                    if num_freevars > 0:
+                        closure = tuple(types.CellType() for _ in range(num_freevars))
+                    else:
+                        closure = None
+
+                    obj = types.FunctionType(
+                        code=const,
+                        globals=f.__globals__,
+                        closure=closure
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+        if obj is not None and inspect.isfunction(obj):
+            # Recursive call with incremented depth
+            if check_function_calls(obj, func_name, max_depth, seen, _current_depth + 1):
+                return True
+
+    return False
+
 
 def test_classify_zero_one(classify_zero_one):
     # test on the first two images
